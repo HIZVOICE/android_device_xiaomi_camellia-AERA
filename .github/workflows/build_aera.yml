@@ -113,9 +113,17 @@ jobs:
           echo "=== Sync complete ==="
 
           echo "=== Unpack the device tree (bootstrap zip) ==="
-          # Bootstrap layout: the tree ships as tree.zip at this repo's root
-          # (checked out into $GITHUB_WORKSPACE by step 1). It will be expanded
-          # into a regular file tree in a later cleanup.
+          # NOTE (build #2, run 42310894458): the sync itself SUCCEEDED on
+          # attempt 1 — the failure was this unzip: tree.zip was not at
+          # $GITHUB_WORKSPACE/tree.zip. Cause: step 2 (maximize-build-space)
+          # mounts a fresh LVM volume OVER $GITHUB_WORKSPACE by default,
+          # hiding everything step 1 checked out. So re-fetch tree.zip here,
+          # after the mount, straight from the repo (public, no auth).
+          TREE_RAW="$(echo "${{ github.event.inputs.DEVICE_TREE_URL }}" | sed 's|https://github.com/|https://raw.githubusercontent.com/|')/${{ github.event.inputs.DEVICE_TREE_BRANCH }}/tree.zip"
+          echo "Fetching ${TREE_RAW}"
+          curl -sL --retry 3 -o "${GITHUB_WORKSPACE}/tree.zip" "${TREE_RAW}"
+          ls -lh "${GITHUB_WORKSPACE}/tree.zip"
+          test "$(stat -c%s "${GITHUB_WORKSPACE}/tree.zip")" -gt 10000000 || { echo "ERROR: tree.zip download looks wrong (too small)"; exit 1; }
           mkdir -p ${{ github.event.inputs.DEVICE_PATH }}
           unzip -q "${GITHUB_WORKSPACE}/tree.zip" -d ${{ github.event.inputs.DEVICE_PATH }}
           ls ${{ github.event.inputs.DEVICE_PATH }}
