@@ -1,0 +1,144 @@
+name: Build AERA Recovery (Android 16)
+
+on:
+  workflow_dispatch:
+    inputs:
+      DEVICE_CODE:
+        description: 'Device codename (e.g. camellia)'
+        required: true
+        default: 'camellia'
+      DEVICE_TREE_URL:
+        description: 'Device tree git URL'
+        required: true
+        default: 'https://github.com/HIZVOICE/android_device_xiaomi_camellia-AERA'
+      DEVICE_TREE_BRANCH:
+        description: 'Device tree branch'
+        required: true
+        default: 'main'
+      DEVICE_PATH:
+        description: 'Device tree path in the source (e.g. device/xiaomi/camellia)'
+        required: true
+        default: 'device/xiaomi/camellia'
+      BUILD_TARGET:
+        description: 'Build target (recoveryimage or bootimage)'
+        required: true
+        default: 'bootimage'
+
+jobs:
+  build:
+    name: Build AERA Recovery
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: 1. Check out workflow repo
+        uses: actions/checkout@v4
+
+      - name: 2. Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 16384
+          temp-reserve-mb: 12288
+          swap-size-mb: 8192
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - name: 3. Check disk and memory
+        run: |
+          df -h
+          free -h
+
+      - name: 4. Install Android 16 build dependencies and repo tool
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update
+          sudo apt-get install -y \
+            git-core gnupg flex bison build-essential zip curl zlib1g-dev \
+            libc6-dev-i386 libncurses5 lib32ncurses5-dev x11proto-core-dev libx11-dev \
+            lib32z1-dev libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig \
+            python3 python-is-python3 rsync lz4 bc ccache
+
+          mkdir -p ~/bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          sudo ln -sf ~/bin/repo /usr/bin/repo
+
+          git config --global user.name "AERA-Builder"
+          git config --global user.email "builder@github.local"
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+      - name: 5. Init manifest and sync AERA 16.0 source
+        run: |
+          # Build inside $GITHUB_WORKSPACE (the ~115GB volume), not ~ (12GB root)
+          WORKDIR="${GITHUB_WORKSPACE}/aera_workspace"
+          mkdir -p "${WORKDIR}"
+          cd "${WORKDIR}"
+
+          echo "=== Init manifest ==="
+          repo init --depth=1 -u https://github.com/AERA-Recovery/android_manifest.git -b aera-16.0
+
+          # Rewrite any ssh:// remotes in the manifest to https://
+          find .repo/manifests -name "*.xml" -exec sed -i 's|ssh://git@github.com/|https://github.com/|g' {} + || true
+
+          echo "=== Shallow sync ==="
+          repo sync -c --no-clone-bundle --no-tags --optimized-fetch --prune -j$(nproc --all) || repo sync -c -j4
+
+          echo "=== Unpack the device tree (bootstrap zip) ==="
+          # Bootstrap layout: the tree ships as tree.zip at this repo's root
+          # (checked out into $GITHUB_WORKSPACE by step 1). It will be expanded
+          # into a regular file tree in a later cleanup.
+          mkdir -p ${{ github.event.inputs.DEVICE_PATH }}
+          unzip -q "${GITHUB_WORKSPACE}/tree.zip" -d ${{ github.event.inputs.DEVICE_PATH }}
+          ls ${{ github.event.inputs.DEVICE_PATH }}
+
+      - name: 6. Delete .repo to reclaim ~20GB
+        run: |
+          WORKDIR="${GITHUB_WORKSPACE}/aera_workspace"
+          cd "${WORKDIR}"
+          df -h "${WORKDIR}"
+          echo "Removing .repo to free up ~20GB of disk space..."
+          rm -rf .repo
+          df -h "${WORKDIR}"
+
+      - name: 7. Build
+        env:
+          # Soong Go memory tuning to avoid OOM during Android 16 analysis
+          GOGC: "50"
+          GOMEMLIMIT: "12GiB"
+          ALLOW_MISSING_DEPENDENCIES: "true"
+        run: |
+          WORKDIR="${GITHUB_WORKSPACE}/aera_workspace"
+          cd "${WORKDIR}"
+          source build/envsetup.sh
+
+          echo "=== Lunch ==="
+          TARGET="${{ github.event.inputs.DEVICE_CODE }}"
+          lunch twrp_${TARGET}-bp2a-eng || lunch aera_${TARGET}-bp2a-eng || lunch twrp_${TARGET}-eng || lunch omni_${TARGET}-eng
+
+          echo "=== Build ${{ github.event.inputs.BUILD_TARGET }} ==="
+          if command -v mka >/dev/null 2>&1; then
+            mka ${{ github.event.inputs.BUILD_TARGET }} -j$(nproc --all)
+          else
+            m ${{ github.event.inputs.BUILD_TARGET }}
+          fi
+
+          echo "=== Collect artifacts ==="
+          mkdir -p "${GITHUB_WORKSPACE}/artifacts"
+          find "out/target/product/${TARGET}" -maxdepth 1 \( -name "*.img" -o -name "*.zip" \) -exec cp {} "${GITHUB_WORKSPACE}/artifacts/" \;
+          ls -lh "${GITHUB_WORKSPACE}/artifacts/"
+
+      - name: 8. Upload artifacts to a GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: success()
+        with:
+          tag_name: AERA-${{ github.event.inputs.DEVICE_CODE }}-${{ github.run_id }}
+          name: AERA Recovery for ${{ github.event.inputs.DEVICE_CODE }} (Android 16)
+          files: |
+            ${{ github.workspace }}/artifacts/*.img
+            ${{ github.workspace }}/artifacts/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
