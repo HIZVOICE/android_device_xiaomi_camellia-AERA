@@ -85,7 +85,32 @@ jobs:
           find .repo/manifests -name "*.xml" -exec sed -i 's|ssh://git@github.com/|https://github.com/|g' {} + || true
 
           echo "=== Shallow sync ==="
-          repo sync -c --no-clone-bundle --no-tags --optimized-fetch --prune -j$(nproc --all) || repo sync -c -j4
+          # Build #1 died in this step: repo init succeeded, then the sync ran
+          # ~63 min in total silence and GitHub reported the hosted runner
+          # "lost communication" (starved or blocked — no error in the step log).
+          # Defences, all inside this step:
+          #  - GIT_TERMINAL_PROMPT=0: a dead/private remote must FAIL FAST,
+          #    never block forever on a hidden credential prompt.
+          #  - explicit -j4, a per-attempt timeout, and a resume loop — repo sync
+          #    is incremental, so every attempt keeps the progress already made.
+          #  - a completeness sentinel: an incomplete sync fails loudly here
+          #    instead of passing a broken tree to the build step.
+          export GIT_TERMINAL_PROMPT=0
+          SYNC_OK=0
+          for attempt in 1 2 3; do
+            echo "--- sync attempt ${attempt} ---"
+            if timeout 2700 repo sync -c --no-clone-bundle --no-tags --prune -j4 --verbose; then
+              SYNC_OK=1
+              break
+            fi
+            echo "sync attempt ${attempt} incomplete — resuming in 15s"
+            sleep 15
+          done
+          if [ "${SYNC_OK}" != "1" ] || [ ! -f build/envsetup.sh ]; then
+            echo "ERROR: source sync did not complete after 3 attempts"
+            exit 1
+          fi
+          echo "=== Sync complete ==="
 
           echo "=== Unpack the device tree (bootstrap zip) ==="
           # Bootstrap layout: the tree ships as tree.zip at this repo's root
