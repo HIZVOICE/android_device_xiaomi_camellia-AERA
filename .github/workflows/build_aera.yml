@@ -179,8 +179,16 @@ jobs:
       - name: 7. Build
         env:
           # Soong Go memory tuning to avoid OOM during Android 16 analysis
+          # Build #15 (run 42382276139) was the 10th hosted-runner
+          # lost-communication loss; builds #9-#15 ALL died ~48-49 min into
+          # this step, #14's log tail showing death at [99% 130/131] of the
+          # Soong bootstrap with no error. GitHub's annotation names
+          # CPU/memory starvation as a cause — and GOMEMLIMIT was 12GiB on
+          # a 7 GB runner, i.e. the Go heap was allowed to exceed physical
+          # RAM, so Soong could OOM-kill the runner at peak. Lowered to 5GiB
+          # (below the 7 GB the runner actually has) for build #16.
           GOGC: "50"
-          GOMEMLIMIT: "12GiB"
+          GOMEMLIMIT: "5GiB"
           ALLOW_MISSING_DEPENDENCIES: "true"
         run: |
           WORKDIR="${GITHUB_WORKSPACE}/aera_workspace"
