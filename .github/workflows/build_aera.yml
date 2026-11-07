@@ -37,9 +37,13 @@ jobs:
       - name: 2. Maximize build space
         uses: easimon/maximize-build-space@master
         with:
-          root-reserve-mb: 16384
-          temp-reserve-mb: 12288
-          swap-size-mb: 8192
+          # Build #5 died on ENOSPC: sync + working tree need ~105-115G and
+          # the volume only had ~79G free at sync start. These reserves were
+          # eating the build volume for no benefit (root/temp are small here),
+          # so shrink them to buy back ~20G of headroom.
+          root-reserve-mb: 4096
+          temp-reserve-mb: 4096
+          swap-size-mb: 4096
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
@@ -96,20 +100,37 @@ jobs:
           #  - heartbeat: a background loop prints .repo size and disk free
           #    every 60s, so the runner never sits silent for an hour.
           #  - -j2 instead of -j4: halves parallel git memory pressure.
-          #  - 20-min per-attempt timeout (was 45): a stuck attempt fails
-          #    loudly and the resume loop continues from progress made —
-          #    repo sync is incremental, so no work is lost.
           #  - GIT_TERMINAL_PROMPT=0: a dead/private remote must FAIL FAST,
           #    never block forever on a hidden credential prompt.
           #  - a completeness sentinel: an incomplete sync fails loudly here
           #    instead of passing a broken tree to the build step.
+          # Build #5 (run 42327642579) changed the picture: the sync did NOT
+          # hang — it died on ENOSPC (OSError 28). .repo grew to 48G and free
+          # disk fell 79G -> 209M across attempts 1-2; attempts 3-4 died
+          # instantly on the same error. Build #4 had squeaked through at
+          # .repo 21G / 9.5G free, so sync + working tree only just fits the
+          # ~115G volume and any drift kills it. Fixes in this revision:
+          #  - 45-min per-attempt timeout (was 20): a killed attempt leaves
+          #    orphaned packfiles behind, so the resume loop itself bloats
+          #    .repo; one long attempt should finish the sync outright
+          #    (build #4's whole sync took 24m15s). 3 attempts, not 4.
+          #  - --depth=1 passed explicitly to repo sync (init already sets
+          #    it, but resume attempts must stay shallow too).
+          #  - disk guard: fail fast with a clear message if free space is
+          #    under 15G at an attempt's start, instead of burning 30 min.
           export GIT_TERMINAL_PROMPT=0
           SYNC_OK=0
-          for attempt in 1 2 3 4; do
+          for attempt in 1 2 3; do
             echo "--- sync attempt ${attempt} ---"
+            echo "free disk at attempt start: $(df -h . | tail -1 | awk '{print $4}')"
+            FREE_GB=$(df --output=avail -BG . | tail -1 | tr -dc '0-9')
+            if [ "${FREE_GB}" -lt 15 ]; then
+              echo "ERROR: only ${FREE_GB}G free at attempt start — sync cannot fit; aborting"
+              exit 1
+            fi
             ( while true; do sleep 60; echo "[heartbeat] attempt ${attempt}: .repo=$(du -sh .repo 2>/dev/null | cut -f1), disk free=$(df -h . | tail -1 | awk '{print $4}')"; done ) &
             HB_PID=$!
-            if timeout 1200 repo sync -c --no-clone-bundle --no-tags --prune -j2 --verbose; then
+            if timeout 2700 repo sync -c --depth=1 --no-clone-bundle --no-tags --prune -j2 --verbose; then
               kill ${HB_PID} 2>/dev/null || true
               SYNC_OK=1
               break
@@ -119,7 +140,7 @@ jobs:
             sleep 15
           done
           if [ "${SYNC_OK}" != "1" ] || [ ! -f build/envsetup.sh ]; then
-            echo "ERROR: source sync did not complete after 4 attempts"
+            echo "ERROR: source sync did not complete after 3 attempts"
             exit 1
           fi
           echo "=== Sync complete ==="
