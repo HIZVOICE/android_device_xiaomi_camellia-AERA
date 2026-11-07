@@ -116,10 +116,14 @@ jobs:
           #    orphaned packfiles behind, so the resume loop itself bloats
           #    .repo; one long attempt should finish the sync outright
           #    (build #4's whole sync took 24m15s). 3 attempts, not 4.
-          #  - --depth=1 passed explicitly to repo sync (init already sets
-          #    it, but resume attempts must stay shallow too).
           #  - disk guard: fail fast with a clear message if free space is
           #    under 15G at an attempt's start, instead of burning 30 min.
+          #  - NOTE (build #7, run 42337795548): `--depth=1` must NOT be
+          #    passed to `repo sync` — this repo-tool version rejects it
+          #    ("no such option: --depth") and all 3 attempts died instantly
+          #    on the usage error. The shallow clone is already established
+          #    by `repo init --depth=1` above; sync inherits it. Do not
+          #    re-add --depth to the sync line.
           export GIT_TERMINAL_PROMPT=0
           SYNC_OK=0
           for attempt in 1 2 3; do
@@ -132,7 +136,7 @@ jobs:
             fi
             ( while true; do sleep 60; echo "[heartbeat] attempt ${attempt}: .repo=$(du -sh .repo 2>/dev/null | cut -f1), disk free=$(df -h . | tail -1 | awk '{print $4}')"; done ) &
             HB_PID=$!
-            if timeout 2700 repo sync -c --depth=1 --no-clone-bundle --no-tags --prune -j2 --verbose; then
+            if timeout 2700 repo sync -c --no-clone-bundle --no-tags --prune -j2 --verbose; then
               kill ${HB_PID} 2>/dev/null || true
               SYNC_OK=1
               break
