@@ -37,13 +37,15 @@ jobs:
       - name: 2. Maximize build space
         uses: easimon/maximize-build-space@master
         with:
-          # Build #5 died on ENOSPC: sync + working tree need ~105-115G and
-          # the volume only had ~79G free at sync start. These reserves were
-          # eating the build volume for no benefit (root/temp are small here),
-          # so shrink them to buy back ~20G of headroom.
-          root-reserve-mb: 4096
-          temp-reserve-mb: 4096
-          swap-size-mb: 4096
+          # Build #6 (run 42336623555) PROVED the 4096/4096/4096 reserve cut
+          # breaks this step: it died in 82s with repeated "fallocate:
+          # invalid length value specified". Reverted to the values that
+          # passed this step in builds #1-#5. Do NOT shrink these reserves
+          # again without evidence; the ENOSPC fix rests on the sync-side
+          # changes below (longer attempts, explicit --depth=1, disk guard).
+          root-reserve-mb: 16384
+          temp-reserve-mb: 12288
+          swap-size-mb: 8192
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
