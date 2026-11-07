@@ -84,30 +84,42 @@ jobs:
           # Rewrite any ssh:// remotes in the manifest to https://
           find .repo/manifests -name "*.xml" -exec sed -i 's|ssh://git@github.com/|https://github.com/|g' {} + || true
 
+          echo "=== Network probe ==="
+          git ls-remote https://github.com/AERA-Recovery/android_manifest.git aera-16.0 | head -2
+
           echo "=== Shallow sync ==="
-          # Build #1 died in this step: repo init succeeded, then the sync ran
-          # ~63 min in total silence and GitHub reported the hosted runner
-          # "lost communication" (starved or blocked — no error in the step log).
-          # Defences, all inside this step:
+          # Builds #1 and #3 died in this step: repo sync produced NO output
+          # at all and GitHub reported the hosted runner "lost communication"
+          # after ~63-66 min of silence. Build #2, with identical sync code,
+          # synced fine in ~20 min — so this is runner fragility on a
+          # 1,039-project manifest, not a code error. Defences:
+          #  - heartbeat: a background loop prints .repo size and disk free
+          #    every 60s, so the runner never sits silent for an hour.
+          #  - -j2 instead of -j4: halves parallel git memory pressure.
+          #  - 20-min per-attempt timeout (was 45): a stuck attempt fails
+          #    loudly and the resume loop continues from progress made —
+          #    repo sync is incremental, so no work is lost.
           #  - GIT_TERMINAL_PROMPT=0: a dead/private remote must FAIL FAST,
           #    never block forever on a hidden credential prompt.
-          #  - explicit -j4, a per-attempt timeout, and a resume loop — repo sync
-          #    is incremental, so every attempt keeps the progress already made.
           #  - a completeness sentinel: an incomplete sync fails loudly here
           #    instead of passing a broken tree to the build step.
           export GIT_TERMINAL_PROMPT=0
           SYNC_OK=0
-          for attempt in 1 2 3; do
+          for attempt in 1 2 3 4; do
             echo "--- sync attempt ${attempt} ---"
-            if timeout 2700 repo sync -c --no-clone-bundle --no-tags --prune -j4 --verbose; then
+            ( while true; do sleep 60; echo "[heartbeat] attempt ${attempt}: .repo=$(du -sh .repo 2>/dev/null | cut -f1), disk free=$(df -h . | tail -1 | awk '{print $4}')"; done ) &
+            HB_PID=$!
+            if timeout 1200 repo sync -c --no-clone-bundle --no-tags --prune -j2 --verbose; then
+              kill ${HB_PID} 2>/dev/null || true
               SYNC_OK=1
               break
             fi
+            kill ${HB_PID} 2>/dev/null || true
             echo "sync attempt ${attempt} incomplete — resuming in 15s"
             sleep 15
           done
           if [ "${SYNC_OK}" != "1" ] || [ ! -f build/envsetup.sh ]; then
-            echo "ERROR: source sync did not complete after 3 attempts"
+            echo "ERROR: source sync did not complete after 4 attempts"
             exit 1
           fi
           echo "=== Sync complete ==="
